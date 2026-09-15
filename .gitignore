@@ -1,0 +1,20 @@
+# Android / Gradle
+*.iml
+.gradle/
+build/
+local.properties
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Firma — nunca al repo
+*.jks
+*.keystore
+keystore.properties
+
+# Firebase (llega en M2)
+google-services.json
+
+# Datos personales de salud
+salidas/

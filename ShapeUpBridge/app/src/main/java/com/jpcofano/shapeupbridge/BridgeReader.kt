@@ -36,6 +36,26 @@ object Target {
 }
 
 /**
+ * Rango de lectura por hora de inicio local. PU1 usa las fechas fijas de la verdad de campo;
+ * las corridas de subida (PU3) usan una ventana movil de dias hacia atras.
+ */
+class ReadRange(
+    val exerciseFrom: LocalDateTime,
+    val exerciseTo: LocalDateTime,
+    val bodyFrom: LocalDateTime,
+    val bodyTo: LocalDateTime,
+) {
+    companion object {
+        val PU1 = ReadRange(Target.DAY_START, Target.DAY_END, Target.BODY_START, Target.BODY_END)
+
+        fun lastDays(days: Long, now: LocalDateTime = LocalDateTime.now()): ReadRange {
+            val from = now.minusDays(days)
+            return ReadRange(from, now, from, now)
+        }
+    }
+}
+
+/**
  * Lee crudo del Samsung Health Data SDK y arma el JSON del volcado. No normaliza, no
  * deduplica, no descarta campos. Ver docs/contexto.md.
  */
@@ -74,6 +94,9 @@ class BridgeReader(private val store: HealthDataStore) {
                 token = response.pageToken
                 pages++
             } while (token != null && pages < MAX_PAGES)
+            if (token != null) {
+                error(label, IllegalStateException("se alcanzo el tope de $MAX_PAGES paginas; lectura incompleta"))
+            }
         } catch (t: Throwable) {
             error(label, t)
         }
@@ -82,22 +105,24 @@ class BridgeReader(private val store: HealthDataStore) {
 
     private fun exerciseBuilder(
         source: ReadSourceFilter?,
+        from: LocalDateTime,
+        to: LocalDateTime,
     ): ReadDataRequest.DualTimeBuilder<HealthDataPoint> {
         val builder: ReadDataRequest.DualTimeBuilder<HealthDataPoint> =
             DataTypes.EXERCISE.readDataRequestBuilder
-        builder.setLocalTimeFilter(LocalTimeFilter.of(Target.DAY_START, Target.DAY_END))
+        builder.setLocalTimeFilter(LocalTimeFilter.of(from, to))
         builder.setOrdering(Ordering.ASC)
         if (source != null) builder.setSourceFilter(source)
         return builder
     }
 
-    suspend fun readExercise(): List<HealthDataPoint> =
-        readAllPages("exercise") { exerciseBuilder(null) }
+    suspend fun readExercise(range: ReadRange): List<HealthDataPoint> =
+        readAllPages("exercise") { exerciseBuilder(null, range.exerciseFrom, range.exerciseTo) }
 
-    suspend fun readBodyComposition(): List<HealthDataPoint> = readAllPages("bodyComposition") {
+    suspend fun readBodyComposition(range: ReadRange): List<HealthDataPoint> = readAllPages("bodyComposition") {
         val builder: ReadDataRequest.DualTimeBuilder<HealthDataPoint> =
             DataTypes.BODY_COMPOSITION.readDataRequestBuilder
-        builder.setLocalTimeFilter(LocalTimeFilter.of(Target.BODY_START, Target.BODY_END))
+        builder.setLocalTimeFilter(LocalTimeFilter.of(range.bodyFrom, range.bodyTo))
         builder.setOrdering(Ordering.ASC)
         builder
     }
@@ -106,7 +131,7 @@ class BridgeReader(private val store: HealthDataStore) {
      * Relee el mismo dia filtrando por fuente. Sirve para descartar el filtro de fuente como
      * causa de un `log` vacio antes de declarar que no hay datos: lo pide el prompt.
      */
-    suspend fun probeSources(): JSONArray {
+    suspend fun probeSources(range: ReadRange): JSONArray {
         val probes = JSONArray()
         val filters = listOf<Pair<String, ReadSourceFilter>>(
             "watch" to ReadSourceFilter.fromDeviceType(DeviceGroup.WATCH),
@@ -115,7 +140,9 @@ class BridgeReader(private val store: HealthDataStore) {
             "platform" to ReadSourceFilter.fromPlatform(),
         )
         for ((name, filter) in filters) {
-            val points = readAllPages("probe:$name") { exerciseBuilder(filter) }
+            val points = readAllPages("probe:$name") {
+                exerciseBuilder(filter, range.exerciseFrom, range.exerciseTo)
+            }
             val sessions = JSONArray()
             for (point in points) {
                 for (session in point.sessions()) {

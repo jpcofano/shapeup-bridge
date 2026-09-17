@@ -7,6 +7,9 @@
     <string name="sign_in">Entrar con Google</string>
     <string name="sign_out">Salir</string>
     <string name="signed_out">Sin sesion</string>
+    <string name="run_now">Correr en segundo plano ahora</string>
+    <string name="runs_title">Ultimas corridas</string>
+    <string name="no_runs">Sin corridas todavia</string>
     <!-- Strings used for fragments for navigation -->
     <string name="first_fragment_label">First Fragment</string>
     <string name="second_fragment_label">Second Fragment</string>

@@ -21,6 +21,8 @@ googleServices = "4.5.0"
 credentials = "1.6.0"
 # 1.2.1 trae metadata Kotlin 2.4; el compilador de AGP 9.3.2 (Kotlin 2.2) lee hasta 2.3.
 googleid = "1.2.0"
+# PU3: segundo plano. 2.11.2 trae metadata Kotlin 2.1 y coroutines 1.9.0.
+workManager = "2.11.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -43,6 +45,7 @@ firebase-firestore = { group = "com.google.firebase", name = "firebase-firestore
 kotlinx-coroutines-play-services = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-play-services", version.ref = "coroutines" }
 androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
 androidx-credentials-play-services-auth = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
+androidx-work-runtime = { group = "androidx.work", name = "work-runtime", version.ref = "workManager" }
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
 
 [plugins]

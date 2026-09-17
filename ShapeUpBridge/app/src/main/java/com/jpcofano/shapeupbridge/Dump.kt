@@ -143,6 +143,9 @@ suspend fun buildDump(
     reader: BridgeReader,
     permissions: JSONObject,
     runInfo: JSONObject,
+    range: ReadRange,
+    // Las sondas por fuente son diagnostico de PU1: releen el rango cuatro veces.
+    probeIfTargetMissing: Boolean = true,
 ): DumpResult {
     val root = JSONObject()
     root.put("generatedAt", instant(Instant.now()))
@@ -155,14 +158,14 @@ suspend fun buildDump(
             .put(
                 "exercise",
                 JSONObject()
-                    .put("localFrom", Target.DAY_START.toString())
-                    .put("localTo", Target.DAY_END.toString())
+                    .put("localFrom", range.exerciseFrom.toString())
+                    .put("localTo", range.exerciseTo.toString())
             )
             .put(
                 "bodyComposition",
                 JSONObject()
-                    .put("localFrom", Target.BODY_START.toString())
-                    .put("localTo", Target.BODY_END.toString())
+                    .put("localFrom", range.bodyFrom.toString())
+                    .put("localTo", range.bodyTo.toString())
             )
     )
 
@@ -171,7 +174,7 @@ suspend fun buildDump(
     val records = ArrayList<RawRecord>()
 
     var t0 = System.currentTimeMillis()
-    val exercisePoints = reader.readExercise()
+    val exercisePoints = reader.readExercise(range)
     val exerciseReadAt = System.currentTimeMillis()
     timings.put("exerciseReadMs", exerciseReadAt - t0)
 
@@ -223,9 +226,11 @@ suspend fun buildDump(
     // Sondas por fuente. Solo tienen sentido si la sesion objetivo no trajo curva: si la trajo,
     // releer cuatro veces el dia entero cuesta tiempo y no aporta nada.
     val targetLog = target?.second?.log
-    if (targetLog == null || targetLog.size < 10) {
+    if (!probeIfTargetMissing) {
+        root.put("sourceProbes", JSONObject().put("skipped", "corrida de subida"))
+    } else if (targetLog == null || targetLog.size < 10) {
         t0 = System.currentTimeMillis()
-        root.put("sourceProbes", reader.probeSources())
+        root.put("sourceProbes", reader.probeSources(range))
         timings.put("sourceProbesMs", System.currentTimeMillis() - t0)
     } else {
         root.put(
@@ -235,7 +240,7 @@ suspend fun buildDump(
     }
 
     t0 = System.currentTimeMillis()
-    val bodyPoints = reader.readBodyComposition()
+    val bodyPoints = reader.readBodyComposition(range)
     val bodyReadAt = System.currentTimeMillis()
     timings.put("bodyCompositionReadMs", bodyReadAt - t0)
     val body = JSONObject()

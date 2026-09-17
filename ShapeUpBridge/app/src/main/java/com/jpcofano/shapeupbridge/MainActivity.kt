@@ -1,11 +1,16 @@
 package com.jpcofano.shapeupbridge
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.View
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -23,8 +28,6 @@ import com.jpcofano.shapeupbridge.databinding.ActivityMainBinding
 import com.samsung.android.sdk.health.data.HealthDataService
 import com.samsung.android.sdk.health.data.HealthDataStore
 import com.samsung.android.sdk.health.data.error.ResolvablePlatformException
-import com.samsung.android.sdk.health.data.permission.AccessType
-import com.samsung.android.sdk.health.data.permission.Permission
 import com.samsung.android.sdk.health.data.request.DataTypes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -34,7 +37,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.time.Instant
+import java.text.SimpleDateFormat
 import java.time.ZoneId
+import java.util.Date
+import java.util.Locale
 
 /**
  * Puente. "Leer" vuelca a archivo (PU1); "Leer y subir" hace la misma lectura y ademas sube cada
@@ -49,11 +55,12 @@ class MainActivity : AppCompatActivity() {
     private val credentialManager by lazy { CredentialManager.create(this) }
     private var outputFile: File? = null
 
-    private val permissions = setOf(
-        Permission.of(DataTypes.EXERCISE, AccessType.READ),
-        Permission.of(DataTypes.HEART_RATE, AccessType.READ),
-        Permission.of(DataTypes.BODY_COMPOSITION, AccessType.READ),
-    )
+    private val permissions = BridgeRun.PERMISSIONS
+
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            say("permiso de notificaciones: ${if (granted) "concedido" else "denegado"}")
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,14 +80,20 @@ class MainActivity : AppCompatActivity() {
         binding.shareButton.setOnClickListener { share() }
         binding.signInButton.setOnClickListener { signIn() }
         binding.signOutButton.setOnClickListener { signOut() }
+        binding.runNowButton.setOnClickListener {
+            BridgeWorker.runNow(applicationContext)
+            say("corrida en segundo plano encolada: arranca en 60 s")
+        }
 
         // Firebase persiste la sesion entre aperturas: si hay usuario aca, no hubo login nuevo.
         val restored = auth.currentUser
         say(if (restored != null) "sesion restaurada al abrir: ${restored.email}" else "sin sesion al abrir")
+        if (restored != null) BridgeWorker.schedule(applicationContext)
         renderAuth()
 
         say("zona horaria del telefono: ${ZoneId.systemDefault()}")
-        say("dia objetivo local: ${Target.DAY_START} .. ${Target.DAY_END}")
+        say("dia objetivo local (Leer): ${Target.DAY_START} .. ${Target.DAY_END}")
+        say("ventana de la proxima subida: ${BridgeRun.windowDays(this)} dias")
         checkPermissionsAtStartup()
     }
 
@@ -116,6 +129,41 @@ class MainActivity : AppCompatActivity() {
         binding.signInButton.visibility = if (user == null) View.VISIBLE else View.GONE
         binding.signOutButton.visibility = if (user == null) View.GONE else View.VISIBLE
         binding.uploadButton.isEnabled = user != null
+        binding.runNowButton.isEnabled = user != null
+    }
+
+    override fun onResume() {
+        super.onResume()
+        renderHistory()
+    }
+
+    /** Las ultimas corridas guardadas localmente, manuales y de segundo plano. */
+    private fun renderHistory() {
+        val runs = RunHistory.all(this)
+        if (runs.isEmpty()) {
+            binding.historyView.text = getString(R.string.no_runs)
+            return
+        }
+        val fmt = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault())
+        binding.historyView.text = runs.joinToString("\n") { r ->
+            buildString {
+                append("${fmt.format(Date(r.endedMs))}  ${r.origin}  ${r.windowDays}d  ")
+                append("leidos ${r.read} subidos ${r.uploaded} sinCambios ${r.unchanged} ")
+                append("omitidos ${r.skipped} errores ${r.errors}  ${r.durationMs} ms")
+                if (r.queued > 0) append("  (en cola ${r.queued})")
+                if (r.message != null) append("\n    ${r.message}")
+                if (r.note != null) append("\n    ${r.note}")
+            }
+        }
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     /** Credential Manager -> id token de Google -> Firebase Auth. */
@@ -141,6 +189,11 @@ class MainActivity : AppCompatActivity() {
                 val firebaseCredential = GoogleAuthProvider.getCredential(google.idToken, null)
                 val user = auth.signInWithCredential(firebaseCredential).await().user
                 say("login ok: ${user?.email}")
+                if (user != null) {
+                    BridgeWorker.schedule(applicationContext)
+                    say("trabajo periodico agendado (cada 6 h)")
+                    requestNotificationPermission()
+                }
             } catch (t: Throwable) {
                 say("login fallo: ${t.javaClass.simpleName}: ${t.message}")
                 Log.e(TAG, "login", t)
@@ -153,9 +206,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun signOut() {
         lifecycleScope.launch {
+            BridgeWorker.cancel(applicationContext)
             auth.signOut()
             runCatching { credentialManager.clearCredentialState(ClearCredentialStateRequest()) }
-            say("sesion cerrada")
+            say("sesion cerrada; trabajo periodico cancelado")
             renderAuth()
         }
     }
@@ -169,6 +223,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.readButton.isEnabled = false
         binding.uploadButton.isEnabled = false
+        binding.runNowButton.isEnabled = false
         lifecycleScope.launch {
             val started = System.currentTimeMillis()
             try {
@@ -205,22 +260,25 @@ class MainActivity : AppCompatActivity() {
                     .put("timeZone", ZoneId.systemDefault().id)
                     .put("startedAt", instant(Instant.ofEpochMilli(started)))
 
+                if (upload && userUid != null) {
+                    runAndUpload(userUid)
+                    return@launch
+                }
+
                 say("leyendo ejercicio del 14/09 ...")
                 val reader = BridgeReader(store)
                 val result = withContext(Dispatchers.Default) {
-                    buildDump(applicationContext, reader, permissionsJson, runInfo)
+                    buildDump(applicationContext, reader, permissionsJson, runInfo, ReadRange.PU1)
                 }
 
                 val elapsed = System.currentTimeMillis() - started
                 result.json.getJSONObject("timings").put("totalMs", elapsed)
 
-                val file = withContext(Dispatchers.IO) { write(result.json) }
+                val file = withContext(Dispatchers.IO) { BridgeRun.writeDumpFile(applicationContext, result.json) }
                 outputFile = file
                 binding.shareButton.isEnabled = true
 
                 report(result, file, elapsed)
-
-                if (upload && userUid != null) upload(result, userUid)
             } catch (t: Throwable) {
                 say("FALLO: ${t.javaClass.name}: ${t.message}")
                 Log.e(TAG, "fallo la corrida", t)
@@ -231,54 +289,72 @@ class MainActivity : AppCompatActivity() {
             } finally {
                 binding.readButton.isEnabled = true
                 renderAuth()
+                renderHistory()
             }
         }
     }
 
-    private suspend fun upload(result: DumpResult, userUid: String) {
-        say("")
-        say("--- subida a Firestore ---")
-        say("registros leidos: ${result.records.size}")
-        val uploader = Uploader(FirebaseFirestore.getInstance(), userUid)
-        val r = uploader.upload(result.records, BuildConfig.VERSION_NAME)
-        say("subidos: ${r.uploaded}  omitidos por tamano: ${r.skippedBySize.size}  errores: ${r.failed}")
-        r.skippedBySize.forEach { say("  omitido por tamano: $it") }
-        r.sanitizedIds.forEach { say("  id con barra reemplazada por guion bajo: $it") }
-        r.errorMessages.forEach { say("  error: $it") }
-        if (r.queued > 0) say("En cola: se sube cuando haya señal (${r.queued} registros)")
-        if (r.permissionDenied) {
-            say("PERMISSION_DENIED: lo mas probable es que la regla de /ingesta-sdk (PU2a) no este desplegada")
+    /** "Leer y subir": la corrida compartida con el worker, con origen manual. */
+    private suspend fun runAndUpload(userUid: String) {
+        val outcome = BridgeRun.execute(this, Origin.MANUAL, userUid) { say(it) }
+        val dump = outcome.dump
+        val file = outcome.file
+        if (dump != null && file != null) {
+            outputFile = file
+            binding.shareButton.isEnabled = true
+            report(dump, file, outcome.summary.durationMs)
         }
-        say("tiempo de subida: ${r.elapsedMs} ms")
+        for (i in 0 until outcome.readerErrors.length()) {
+            val e = outcome.readerErrors.getJSONObject(i)
+            say("error de lectura: ${e.optString("where")}: ${e.optString("type")}: ${e.optString("message")}")
+        }
+        val failure = outcome.failure
+        if (failure is ResolvablePlatformException && failure.hasResolution) {
+            say("Samsung Health ofrece resolucion; abriendola")
+            failure.resolve(this)
+        }
 
-        if (r.queued > 0 || r.failed > 0) {
+        val s = outcome.summary
+        val r = outcome.upload
+        say("")
+        say("--- subida a Firestore (ventana ${s.windowDays} dias) ---")
+        say("leidos: ${s.read}  subidos: ${s.uploaded}  sinCambios: ${s.unchanged}  omitidos: ${s.skipped}  errores: ${s.errors}")
+        if (r != null) {
+            r.split.forEach { (id, n) -> say("  partido en $n partes: $id") }
+            r.skippedTooManyParts.forEach { say("  omitido (mas de ${Uploader.MAX_PARTS} partes): $it") }
+            r.sanitizedIds.forEach { say("  id con barra reemplazada por guion bajo: $it") }
+            if (r.queued > 0) say("En cola: se sube cuando haya señal (${r.queued} registros)")
+            if (r.permissionDenied) {
+                say("PERMISSION_DENIED: lo mas probable es que la regla de /ingesta-sdk no este desplegada")
+            }
+        }
+        s.message?.let { say("  primer error: $it") }
+        s.note?.let { say("  $it") }
+        say("duracion: ${s.durationMs} ms")
+
+        val uploader = outcome.uploader ?: return
+        if (r == null || r.queued > 0 || r.failed > 0) {
             say("verificacion omitida: la subida no quedo confirmada por el servidor")
             return
         }
-        val target = result.records.firstOrNull {
-            it.dataType == DataTypes.EXERCISE.name && it.uid == result.targetUid
+        val target = dump?.records?.firstOrNull {
+            it.dataType == DataTypes.EXERCISE.name && it.uid == dump.targetUid
         }
         if (target == null) {
-            say("verificacion omitida: la sesion de referencia no aparecio en la lectura")
+            say("verificacion omitida: la sesion de referencia no esta en la ventana")
             return
         }
         say("")
-        say("--- verificacion: ${Uploader.docIdOf(target)} leido del servidor ---")
         try {
-            for (c in uploader.verify(target)) {
+            val v = uploader.verify(target)
+            say("--- verificacion, leido del servidor: ${v.docIds.joinToString()} ---")
+            for (c in v.checks) {
                 say("${if (c.ok) "✓" else "✗"} ${c.label}: ${c.actual} (esperado ${c.expected})")
             }
         } catch (t: Throwable) {
             say("verificacion fallo: ${t.javaClass.simpleName}: ${t.message}")
             Log.e(TAG, "verificacion", t)
         }
-    }
-
-    private fun write(json: JSONObject): File {
-        val dir = File(filesDir, "salidas").apply { mkdirs() }
-        val file = File(dir, "volcado-m1.json")
-        file.writeText(json.toString(2))
-        return file
     }
 
     private fun report(result: DumpResult, file: File, elapsedMs: Long) {
@@ -290,6 +366,7 @@ class MainActivity : AppCompatActivity() {
         val summaries = exercise.getJSONArray("summaries")
         for (i in 0 until summaries.length()) {
             val s = summaries.getJSONObject(i)
+            if (summaries.length() > 12 && s.optString("uid") != result.targetUid) continue
             val start = s.getJSONObject("startTime").getString("iso")
             say(
                 "  $start  ${s.opt("exerciseType")}  " +
@@ -312,7 +389,8 @@ class MainActivity : AppCompatActivity() {
         }
         val body = json.getJSONObject("bodyComposition")
         say("")
-        say("composicion corporal: ${body.getInt("dataPointCount")} registros del 05/09 al 15/09")
+        val bodyRange = json.getJSONObject("ranges").getJSONObject("bodyComposition")
+        say("composicion corporal: ${body.getInt("dataPointCount")} registros de ${bodyRange.optString("localFrom")} a ${bodyRange.optString("localTo")}")
         val errors = json.getJSONArray("errors")
         if (errors.length() > 0) say("errores registrados: ${errors.length()} (ver JSON)")
         say("")

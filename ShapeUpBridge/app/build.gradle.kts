@@ -1,5 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
+    // Lee app/google-services.json (fuera del repo) y genera default_web_client_id.
+    alias(libs.plugins.google.services)
 }
 
 android {
@@ -32,6 +34,8 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        // versionPuente de cada documento subido sale de BuildConfig.VERSION_NAME.
+        buildConfig = true
     }
 }
 
@@ -51,6 +55,16 @@ dependencies {
     implementation(libs.kotlin.parcelize.runtime)
     implementation(libs.gson)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+
+    // PU2: transporte a Firestore con la cuenta de Google de la web de ShapeUp.
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.auth)
+    implementation(libs.firebase.firestore)
+    implementation(libs.kotlinx.coroutines.play.services)
+    implementation(libs.androidx.credentials)
+    implementation(libs.androidx.credentials.play.services.auth)
+    implementation(libs.googleid)
+
     implementation(libs.androidx.activity.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.constraintlayout)

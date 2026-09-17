@@ -3,6 +3,10 @@
     <string name="subtitle">PoC via D: lee ejercicio del 14/09/2026 y composicion corporal del 05 al 15/09 con el Samsung Health Data SDK, y vuelca crudo.</string>
     <string name="read">Leer</string>
     <string name="share">Compartir</string>
+    <string name="read_and_upload">Leer y subir</string>
+    <string name="sign_in">Entrar con Google</string>
+    <string name="sign_out">Salir</string>
+    <string name="signed_out">Sin sesion</string>
     <!-- Strings used for fragments for navigation -->
     <string name="first_fragment_label">First Fragment</string>
     <string name="second_fragment_label">Second Fragment</string>

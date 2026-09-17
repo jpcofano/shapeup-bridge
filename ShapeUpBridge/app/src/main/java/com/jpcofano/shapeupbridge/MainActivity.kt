@@ -3,12 +3,22 @@ package com.jpcofano.shapeupbridge
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
+import android.view.View
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
 import androidx.lifecycle.lifecycleScope
+import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.firestore.FirebaseFirestore
 import com.jpcofano.shapeupbridge.databinding.ActivityMainBinding
 import com.samsung.android.sdk.health.data.HealthDataService
 import com.samsung.android.sdk.health.data.HealthDataStore
@@ -18,6 +28,7 @@ import com.samsung.android.sdk.health.data.permission.Permission
 import com.samsung.android.sdk.health.data.request.DataTypes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -26,13 +37,16 @@ import java.time.Instant
 import java.time.ZoneId
 
 /**
- * PoC de la via D. Un boton lee, otro comparte el volcado. Sin red, sin Firestore, sin
- * normalizacion: el alcance esta en docs/prompts/P88prima-poc-data-sdk.md.
+ * Puente. "Leer" vuelca a archivo (PU1); "Leer y subir" hace la misma lectura y ademas sube cada
+ * registro crudo a Firestore (PU2). Sin normalizacion: el alcance esta en
+ * docs/prompts/P88prima-poc-data-sdk.md y docs/prompts/pu2-subida-firestore.md.
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var store: HealthDataStore
+    private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
+    private val credentialManager by lazy { CredentialManager.create(this) }
     private var outputFile: File? = null
 
     private val permissions = setOf(
@@ -54,8 +68,16 @@ class MainActivity : AppCompatActivity() {
 
         store = HealthDataService.getStore(applicationContext)
 
-        binding.readButton.setOnClickListener { run() }
+        binding.readButton.setOnClickListener { run(upload = false) }
+        binding.uploadButton.setOnClickListener { run(upload = true) }
         binding.shareButton.setOnClickListener { share() }
+        binding.signInButton.setOnClickListener { signIn() }
+        binding.signOutButton.setOnClickListener { signOut() }
+
+        // Firebase persiste la sesion entre aperturas: si hay usuario aca, no hubo login nuevo.
+        val restored = auth.currentUser
+        say(if (restored != null) "sesion restaurada al abrir: ${restored.email}" else "sin sesion al abrir")
+        renderAuth()
 
         say("zona horaria del telefono: ${ZoneId.systemDefault()}")
         say("dia objetivo local: ${Target.DAY_START} .. ${Target.DAY_END}")
@@ -88,8 +110,65 @@ class MainActivity : AppCompatActivity() {
 
     private var startupGranted: List<String> = emptyList()
 
-    private fun run() {
+    private fun renderAuth() {
+        val user = auth.currentUser
+        binding.authStatus.text = user?.email ?: getString(R.string.signed_out)
+        binding.signInButton.visibility = if (user == null) View.VISIBLE else View.GONE
+        binding.signOutButton.visibility = if (user == null) View.GONE else View.VISIBLE
+        binding.uploadButton.isEnabled = user != null
+    }
+
+    /** Credential Manager -> id token de Google -> Firebase Auth. */
+    private fun signIn() {
+        binding.signInButton.isEnabled = false
+        lifecycleScope.launch {
+            try {
+                val option = GetGoogleIdOption.Builder()
+                    .setFilterByAuthorizedAccounts(false)
+                    .setServerClientId(getString(R.string.default_web_client_id))
+                    .build()
+                val request = GetCredentialRequest.Builder()
+                    .addCredentialOption(option)
+                    .build()
+                val credential = credentialManager.getCredential(this@MainActivity, request).credential
+                if (credential !is CustomCredential ||
+                    credential.type != GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+                ) {
+                    say("login: credencial inesperada (${credential.type})")
+                    return@launch
+                }
+                val google = GoogleIdTokenCredential.createFrom(credential.data)
+                val firebaseCredential = GoogleAuthProvider.getCredential(google.idToken, null)
+                val user = auth.signInWithCredential(firebaseCredential).await().user
+                say("login ok: ${user?.email}")
+            } catch (t: Throwable) {
+                say("login fallo: ${t.javaClass.simpleName}: ${t.message}")
+                Log.e(TAG, "login", t)
+            } finally {
+                binding.signInButton.isEnabled = true
+                renderAuth()
+            }
+        }
+    }
+
+    private fun signOut() {
+        lifecycleScope.launch {
+            auth.signOut()
+            runCatching { credentialManager.clearCredentialState(ClearCredentialStateRequest()) }
+            say("sesion cerrada")
+            renderAuth()
+        }
+    }
+
+    private fun run(upload: Boolean) {
+        // El uid sale siempre de la sesion de Firebase, nunca del codigo.
+        val userUid = auth.currentUser?.uid
+        if (upload && userUid == null) {
+            say("no hay sesion: entrar con Google antes de subir")
+            return
+        }
         binding.readButton.isEnabled = false
+        binding.uploadButton.isEnabled = false
         lifecycleScope.launch {
             val started = System.currentTimeMillis()
             try {
@@ -140,6 +219,8 @@ class MainActivity : AppCompatActivity() {
                 binding.shareButton.isEnabled = true
 
                 report(result, file, elapsed)
+
+                if (upload && userUid != null) upload(result, userUid)
             } catch (t: Throwable) {
                 say("FALLO: ${t.javaClass.name}: ${t.message}")
                 Log.e(TAG, "fallo la corrida", t)
@@ -149,7 +230,47 @@ class MainActivity : AppCompatActivity() {
                 }
             } finally {
                 binding.readButton.isEnabled = true
+                renderAuth()
             }
+        }
+    }
+
+    private suspend fun upload(result: DumpResult, userUid: String) {
+        say("")
+        say("--- subida a Firestore ---")
+        say("registros leidos: ${result.records.size}")
+        val uploader = Uploader(FirebaseFirestore.getInstance(), userUid)
+        val r = uploader.upload(result.records, BuildConfig.VERSION_NAME)
+        say("subidos: ${r.uploaded}  omitidos por tamano: ${r.skippedBySize.size}  errores: ${r.failed}")
+        r.skippedBySize.forEach { say("  omitido por tamano: $it") }
+        r.sanitizedIds.forEach { say("  id con barra reemplazada por guion bajo: $it") }
+        r.errorMessages.forEach { say("  error: $it") }
+        if (r.queued > 0) say("En cola: se sube cuando haya señal (${r.queued} registros)")
+        if (r.permissionDenied) {
+            say("PERMISSION_DENIED: lo mas probable es que la regla de /ingesta-sdk (PU2a) no este desplegada")
+        }
+        say("tiempo de subida: ${r.elapsedMs} ms")
+
+        if (r.queued > 0 || r.failed > 0) {
+            say("verificacion omitida: la subida no quedo confirmada por el servidor")
+            return
+        }
+        val target = result.records.firstOrNull {
+            it.dataType == DataTypes.EXERCISE.name && it.uid == result.targetUid
+        }
+        if (target == null) {
+            say("verificacion omitida: la sesion de referencia no aparecio en la lectura")
+            return
+        }
+        say("")
+        say("--- verificacion: ${Uploader.docIdOf(target)} leido del servidor ---")
+        try {
+            for (c in uploader.verify(target)) {
+                say("${if (c.ok) "✓" else "✗"} ${c.label}: ${c.actual} (esperado ${c.expected})")
+            }
+        } catch (t: Throwable) {
+            say("verificacion fallo: ${t.javaClass.simpleName}: ${t.message}")
+            Log.e(TAG, "verificacion", t)
         }
     }
 
@@ -218,7 +339,7 @@ class MainActivity : AppCompatActivity() {
     private fun say(line: String) {
         Log.i(TAG, line)
         binding.logView.append(line + "\n")
-        binding.logScroll.post { binding.logScroll.fullScroll(android.view.View.FOCUS_DOWN) }
+        binding.logScroll.post { binding.logScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
     companion object {

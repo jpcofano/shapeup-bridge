@@ -15,30 +15,15 @@ import java.time.Instant
  */
 fun curveStats(session: ExerciseSession): JSONObject {
     val log = session.log
-    val stats = JSONObject()
-    stats.putRaw("logSize", log?.size)
     if (log == null) {
-        stats.put("note", "log nulo: el SDK no entrego lista")
-        return stats
+        return JSONObject()
+            .put("logSize", JSONObject.NULL)
+            .put("note", "log nulo: el SDK no entrego lista")
     }
-    val beats = log.mapNotNull { it.heartRate }
-    stats.put("logWithHeartRate", beats.size)
-    if (beats.isNotEmpty()) {
-        stats.put("meanHeartRate", beats.map { it.toDouble() }.average())
-        stats.put("maxHeartRate", beats.max())
-        stats.put("minHeartRate", beats.min())
-    }
-    // Los huecos delatan interpolacion: la verdad de campo espera una pausa real de 17,48 s
-    // entre las dos ultimas entradas.
-    val times = log.map { it.timestamp.toEpochMilli() }
-    if (times.size >= 2) {
-        val gaps = times.zipWithNext { a, b -> b - a }
-        val maxGap = gaps.max()
-        stats.put("maxGapMs", maxGap)
-        stats.put("maxGapAtIndex", gaps.indexOf(maxGap))
-        stats.put("lastGapMs", gaps.last())
-        stats.put("medianGapMs", gaps.sorted()[gaps.size / 2])
-    }
+    val stats = CurveStats.of(
+        times = log.map { it.timestamp.toEpochMilli() },
+        beats = log.map { it.heartRate },
+    ).toJson()
     // Los resumenes que trae la propia sesion, para contrastar con lo recalculado.
     val reported = JSONObject()
     reported.putRaw("meanHeartRate", session.meanHeartRate)
@@ -46,6 +31,59 @@ fun curveStats(session: ExerciseSession): JSONObject {
     reported.putRaw("minHeartRate", session.minHeartRate)
     stats.put("reportedBySdk", reported)
     return stats
+}
+
+/**
+ * Las cifras de la curva. Una sola implementacion para la lectura del SDK (PU1) y para la
+ * verificacion del documento que volvio de Firestore (PU2): si difieren, es el viaje.
+ */
+class CurveStats(
+    val logSize: Int,
+    val withHeartRate: Int,
+    val mean: Double?,
+    val max: Double?,
+    val min: Double?,
+    val maxGapMs: Long?,
+    val maxGapAtIndex: Int?,
+    val lastGapMs: Long?,
+    val medianGapMs: Long?,
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("logSize", logSize)
+        put("logWithHeartRate", withHeartRate)
+        if (mean != null) {
+            put("meanHeartRate", mean)
+            put("maxHeartRate", max)
+            put("minHeartRate", min)
+        }
+        // Los huecos delatan interpolacion: la verdad de campo espera una pausa real de
+        // 17,48 s entre las dos ultimas entradas.
+        if (maxGapMs != null) {
+            put("maxGapMs", maxGapMs)
+            put("maxGapAtIndex", maxGapAtIndex)
+            put("lastGapMs", lastGapMs)
+            put("medianGapMs", medianGapMs)
+        }
+    }
+
+    companion object {
+        fun of(times: List<Long>, beats: List<Number?>): CurveStats {
+            val hr = beats.mapNotNull { it?.toDouble() }
+            val gaps = times.zipWithNext { a, b -> b - a }
+            val maxGap = gaps.maxOrNull()
+            return CurveStats(
+                logSize = times.size,
+                withHeartRate = hr.size,
+                mean = if (hr.isEmpty()) null else hr.average(),
+                max = hr.maxOrNull(),
+                min = hr.minOrNull(),
+                maxGapMs = maxGap,
+                maxGapAtIndex = maxGap?.let { gaps.indexOf(it) },
+                lastGapMs = gaps.lastOrNull(),
+                medianGapMs = if (gaps.isEmpty()) null else gaps.sorted()[gaps.size / 2],
+            )
+        }
+    }
 }
 
 /** La curva con la forma que pide el prompt: [{ "t": epochMs, "hr": bpm }, ...]. */
@@ -86,6 +124,18 @@ class DumpResult(
     val json: JSONObject,
     val curveBytes: Int,
     val targetFound: Boolean,
+    /** Cada registro del SDK con el mismo JSONObject que va al archivo. PU2 los sube. */
+    val records: List<RawRecord>,
+    /** uid del registro que contiene la sesion de referencia, si aparecio. */
+    val targetUid: String?,
+)
+
+/** Un registro del SDK tal como lo vuelca PU1. `json` es el objeto de `dataPoints[]`. */
+class RawRecord(
+    val dataType: String,
+    val uid: String,
+    val readAtMs: Long,
+    val json: JSONObject,
 )
 
 suspend fun buildDump(
@@ -118,9 +168,12 @@ suspend fun buildDump(
 
     val timings = JSONObject()
 
+    val records = ArrayList<RawRecord>()
+
     var t0 = System.currentTimeMillis()
     val exercisePoints = reader.readExercise()
-    timings.put("exerciseReadMs", System.currentTimeMillis() - t0)
+    val exerciseReadAt = System.currentTimeMillis()
+    timings.put("exerciseReadMs", exerciseReadAt - t0)
 
     val summaries = JSONArray()
     var target: Pair<HealthDataPoint, ExerciseSession>? = null
@@ -138,7 +191,11 @@ suspend fun buildDump(
     exercise.put("sessionCount", summaries.length())
     exercise.put("summaries", summaries)
     val rawPoints = JSONArray()
-    exercisePoints.forEach { rawPoints.put(it.encodeFull(DataTypes.EXERCISE)) }
+    exercisePoints.forEach {
+        val raw = it.encodeFull(DataTypes.EXERCISE)
+        rawPoints.put(raw)
+        records.add(RawRecord(DataTypes.EXERCISE.name, it.uid, exerciseReadAt, raw))
+    }
     exercise.put("dataPoints", rawPoints)
     root.put("exercise", exercise)
 
@@ -179,16 +236,21 @@ suspend fun buildDump(
 
     t0 = System.currentTimeMillis()
     val bodyPoints = reader.readBodyComposition()
-    timings.put("bodyCompositionReadMs", System.currentTimeMillis() - t0)
+    val bodyReadAt = System.currentTimeMillis()
+    timings.put("bodyCompositionReadMs", bodyReadAt - t0)
     val body = JSONObject()
     body.put("dataPointCount", bodyPoints.size)
     val bodyRaw = JSONArray()
-    bodyPoints.forEach { bodyRaw.put(it.encodeFull(DataTypes.BODY_COMPOSITION)) }
+    bodyPoints.forEach {
+        val raw = it.encodeFull(DataTypes.BODY_COMPOSITION)
+        bodyRaw.put(raw)
+        records.add(RawRecord(DataTypes.BODY_COMPOSITION.name, it.uid, bodyReadAt, raw))
+    }
     body.put("dataPoints", bodyRaw)
     root.put("bodyComposition", body)
 
     root.put("timings", timings)
     root.put("errors", reader.errors())
 
-    return DumpResult(root, curveBytes, target != null)
+    return DumpResult(root, curveBytes, target != null, records, target?.first?.uid)
 }

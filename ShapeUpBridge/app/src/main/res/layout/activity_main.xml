@@ -68,6 +68,21 @@
         android:text="@string/run_now" />
 
     <TextView
+        android:id="@+id/pushStatusView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="8dp"
+        android:fontFamily="monospace"
+        android:textIsSelectable="true"
+        android:textSize="11sp" />
+
+    <Button
+        android:id="@+id/batteryButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/battery_exemption" />
+
+    <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:paddingTop="8dp"

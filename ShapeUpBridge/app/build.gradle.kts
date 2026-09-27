@@ -65,6 +65,9 @@ dependencies {
     implementation(libs.androidx.credentials.play.services.auth)
     implementation(libs.googleid)
 
+    // P90: push silencioso de ShapeUp que dispara una corrida en el momento.
+    implementation(libs.firebase.messaging)
+
     // PU3: corrida periodica sin la app abierta.
     implementation(libs.androidx.work.runtime)
 

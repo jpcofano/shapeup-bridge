@@ -8,6 +8,8 @@ import com.samsung.android.sdk.health.data.permission.AccessType
 import com.samsung.android.sdk.health.data.permission.Permission
 import com.samsung.android.sdk.health.data.request.DataTypes
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -20,6 +22,8 @@ import java.time.ZoneId
 enum class Origin(val value: String) {
     MANUAL("manual"),
     BACKGROUND("segundo-plano"),
+    // P90: la corrida que dispara un push de ShapeUp.
+    REQUESTED("pedido"),
 }
 
 /** Lo que queda de una corrida: es el documento estado/puente y una fila del historial local. */
@@ -130,6 +134,11 @@ object BridgeRun {
     private const val PREFS = "bridge"
     private const val KEY_FIRST_DONE = "ventanaInicialHecha"
 
+    // Una corrida por vez en el proceso. Un push y la periodica pueden arrancar juntas al volver
+    // la red, y las dos guardan el mismo archivo de hashes: la segunda espera y encuentra todo
+    // sin cambios.
+    private val running = Mutex()
+
     val PERMISSIONS = setOf(
         Permission.of(DataTypes.EXERCISE, AccessType.READ),
         Permission.of(DataTypes.HEART_RATE, AccessType.READ),
@@ -152,8 +161,17 @@ object BridgeRun {
         origin: Origin,
         userUid: String,
         log: (String) -> Unit = {},
+    ): RunOutcome = running.withLock { executeLocked(context, origin, userUid, log) }
+
+    private suspend fun executeLocked(
+        context: Context,
+        origin: Origin,
+        userUid: String,
+        log: (String) -> Unit,
     ): RunOutcome {
         val app = context.applicationContext
+        // Un token puede cambiar sin que llegue onNewToken: se revisa en cada corrida.
+        DeviceToken.sync(app, userUid)?.let { log("token: $it") }
         val started = System.currentTimeMillis()
         val days = windowDays(app)
         val errors = ArrayList<String>()

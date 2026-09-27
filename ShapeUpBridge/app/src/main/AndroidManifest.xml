@@ -4,6 +4,8 @@
 
     <!-- Avisos del worker cuando hubo errores u omitidos (Android 13+). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- P90: pedir desde la app la exclusion de optimizacion de bateria (Samsung corta pushes). -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:allowBackup="true"
@@ -25,6 +27,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- P90: push de datos de ShapeUp que dispara una corrida. -->
+        <service
+            android:name=".PushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
 
         <!-- Salida por share sheet: la maquina puede no tener adb hablando con el telefono. -->
         <provider

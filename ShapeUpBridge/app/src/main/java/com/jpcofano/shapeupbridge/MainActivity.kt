@@ -1,10 +1,15 @@
 package com.jpcofano.shapeupbridge
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import androidx.activity.enableEdgeToEdge
@@ -84,6 +89,9 @@ class MainActivity : AppCompatActivity() {
             BridgeWorker.runNow(applicationContext)
             say("corrida en segundo plano encolada: arranca en 60 s")
         }
+        binding.batteryButton.setOnClickListener { requestBatteryExemption() }
+        // Refresca estado e historial cuando una corrida pedida por push cambia de estado.
+        BridgeWorker.requestedWork(applicationContext).observe(this) { renderHistory() }
 
         // Firebase persiste la sesion entre aperturas: si hay usuario aca, no hubo login nuevo.
         val restored = auth.currentUser
@@ -137,9 +145,53 @@ class MainActivity : AppCompatActivity() {
         renderHistory()
     }
 
+    /**
+     * P90: los eslabones del push a la vista. Token en el servidor, ultimo push que llego y la
+     * corrida que disparo, y si Samsung puede dormir la app.
+     */
+    private fun renderPushStatus(runs: List<RunSummary>) {
+        val fmt = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault())
+        val token = DeviceToken.saved(this)
+        val tokenLine = if (token.registered)
+            "Token registrado: si, actualizado ${fmt.format(Date(token.updatedMs))}"
+        else "Token registrado: no"
+
+        val pushMs = PushLog.lastMs(this)
+        val pushLine = if (pushMs == 0L) "Ultimo push recibido: nunca" else {
+            // La corrida que disparo es la primera "pedido" que termino despues del push.
+            val run = runs.filter { it.origin == Origin.REQUESTED.value && it.endedMs >= pushMs }.lastOrNull()
+            val result = when {
+                run == null -> "corrida pendiente"
+                run.errors == 0 -> "corrida ok en ${(run.endedMs - pushMs) / 1000} s (leidos ${run.read}, subidos ${run.uploaded})"
+                else -> "corrida con ${run.errors} errores: ${run.message}"
+            }
+            "Ultimo push recibido: ${fmt.format(Date(pushMs))}, $result"
+        }
+
+        val ignoring = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+        val batteryLine = if (ignoring) "Bateria: sin optimizacion (concedido)"
+        else "Bateria: optimizada, Samsung puede demorar o cortar los pushes"
+        binding.batteryButton.visibility = if (ignoring) View.GONE else View.VISIBLE
+
+        binding.pushStatusView.text = listOf(tokenLine, pushLine, batteryLine).joinToString("\n")
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun requestBatteryExemption() {
+        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            .setData(Uri.parse("package:$packageName"))
+        try {
+            startActivity(intent)
+        } catch (e: ActivityNotFoundException) {
+            say("no se pudo abrir el pedido de bateria; abriendo la lista de apps")
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
+    }
+
     /** Las ultimas corridas guardadas localmente, manuales y de segundo plano. */
     private fun renderHistory() {
         val runs = RunHistory.all(this)
+        renderPushStatus(runs)
         if (runs.isEmpty()) {
             binding.historyView.text = getString(R.string.no_runs)
             return
@@ -192,6 +244,11 @@ class MainActivity : AppCompatActivity() {
                 if (user != null) {
                     BridgeWorker.schedule(applicationContext)
                     say("trabajo periodico agendado (cada 6 h)")
+                    val tokenError = DeviceToken.sync(applicationContext, user.uid)
+                    say(tokenError?.let { "token: $it" } ?: "token FCM al dia en estado/dispositivo")
+                    renderHistory()
+                    // Para los avisos de error del worker (PU3), no para el push: los mensajes
+                    // de datos no necesitan este permiso.
                     requestNotificationPermission()
                 }
             } catch (t: Throwable) {
@@ -207,10 +264,12 @@ class MainActivity : AppCompatActivity() {
     private fun signOut() {
         lifecycleScope.launch {
             BridgeWorker.cancel(applicationContext)
+            DeviceToken.forget(applicationContext)
             auth.signOut()
             runCatching { credentialManager.clearCredentialState(ClearCredentialStateRequest()) }
             say("sesion cerrada; trabajo periodico cancelado")
             renderAuth()
+            renderHistory()
         }
     }
 

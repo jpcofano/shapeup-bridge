@@ -73,7 +73,8 @@ mostrado el pedido como vencido.
 
 ### Pruebas de P90 (27/09/2026, Galaxy S25+ SM-S936U1, Android 16)
 
-Todas se dispararon con el **botón real de ShapeUp**; ninguna con escritura de administrador.
+Todas se dispararon con el **botón real de ShapeUp**, salvo la parte de `KEEP` de la 3, que es
+un test instrumentado; ninguna con escritura de administrador.
 Detalle, precisión de cada medición y cómo correr lo pendiente en
 [docs/REPORTE-P90.md](docs/REPORTE-P90.md).
 
@@ -82,7 +83,7 @@ Detalle, precisión de cada medición y cómo correr lo pendiente en
 | 1 | Punta a punta | ✅ 6,34 s del botón al fin de la corrida (función en frío) |
 | 2a | Doze forzado por adb | ✅ 3,05 s desde que arranca la función |
 | 2b | Doze real | **PENDIENTE** — va de noche, procedimiento en el reporte |
-| 3 | Dos pedidos seguidos | ⚠️ una sola corrida, pero porque la función descartó el segundo (`muy-seguido`); la política `KEEP` del puente **PENDIENTE** |
+| 3 | Dos pedidos seguidos | ✅ con el botón, la función descartó el segundo (`muy-seguido`); la política `KEEP` del puente, por test instrumentado: un solo trabajo y una sola corrida (no equivale a dos pushes reales) |
 | 4 | Sin conexión | ✅ el push llegó al volver la red; una sola corrida |
 | 5 | Token cambiado a la fuerza | ✅ token nuevo escrito al entrar; el push llegó a él |
 | 6 | App detenida a la fuerza | ✅ ni push ni periódica; al abrirla se reagenda todo solo (y entrega tardía, ver arriba) |

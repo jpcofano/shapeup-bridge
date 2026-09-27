@@ -1,6 +1,6 @@
 # Reporte P90 — El puente escucha
 
-Estado: **hecho y funcionando; dos pruebas y media pendientes.** Lo probado está medido y dice
+Estado: **hecho y funcionando; pendientes la prueba de Doze real y tocar el botón de batería.** Lo probado está medido y dice
 por qué vía se disparó y con qué precisión. Lo pendiente está marcado `PENDIENTE` y no se
 rellenó con estimaciones.
 
@@ -69,19 +69,35 @@ punta con instancia caliente se **estima** en ~4,2 s; es estimación, no medici�
 ### 2b — Doze real — **PENDIENTE**
 Procedimiento abajo.
 
-### 3 — Dos pedidos seguidos ⚠️ / `KEEP` **PENDIENTE**
-Vía: **botón real**, dos veces (sin querer) con 16 s de diferencia. La función mandó el primer
-push y descartó el segundo (`pedido ignorado: muy-seguido`). Hubo una sola corrida, pero por
-el freno de P89, no por el puente: **la política `KEEP` del puente no se ejercitó.**
+### 3 — Dos pedidos seguidos ✅ (en dos partes, ninguna es la cadena entera)
 
-No se puede ejercitar a través de `estado/pedido`, ni con el botón ni escribiendo como
-administrador: toda escritura ahí pasa por la función y el segundo pedido cae en
-`muy-seguido`. Hace falta que lleguen dos pushes al teléfono. Opciones:
-- Test instrumentado (`connectedAndroidTest`) que llame dos veces a
-  `BridgeWorker.runRequested` y verifique un solo trabajo y una sola corrida. No toca el
-  código de la app. Es la recomendada.
-- Mandar dos mensajes FCM directo al token, salteando la función. Requiere credenciales del
-  proyecto; el asistente no tiene autorización para usarlas.
+**3a, lado ShapeUp.** Vía: **botón real**, dos veces (sin querer) con 16 s de diferencia. La
+función mandó el primer push y descartó el segundo (`pedido ignorado: muy-seguido`). Una sola
+corrida, pero por el freno de P89, no por el puente.
+
+**3b, lado puente: política `KEEP`.** Vía: **test instrumentado**
+[RequestedRunKeepTest](../ShapeUpBridge/app/src/androidTest/java/com/jpcofano/shapeupbridge/RequestedRunKeepTest.kt),
+corrido en el teléfono con `adb shell am instrument` (no `connectedAndroidTest`, que
+desinstala la app al terminar). Llama a `BridgeWorker.runRequested` como lo hace
+`onMessageReceived`: dos veces seguidas con el pedido encolado y una tercera con el pedido ya
+corriendo. Resultado: **un solo trabajo** (el mismo id las tres veces) y **una sola corrida
+pedida** (37 leídos, 1 subido, 0 errores; 2,85 s). `OK (1 test)`.
+
+**No es equivalente a dos pushes reales**: prueba la política de WorkManager, no FCM ni
+`onMessageReceived` bajo dos entregas. A través de `estado/pedido` no se puede ejercitar (ni
+con el botón ni como administrador), porque toda escritura ahí pasa por la función y el segundo
+pedido cae en `muy-seguido`. Además de `KEEP`, el mutex de `BridgeRun` impide que dos corridas
+se encimen aunque lleguen por caminos distintos: son dos defensas independientes.
+
+El test hace una corrida real (escribe `estado/puente` con `origen: 'pedido'`) y necesita la
+sesión iniciada:
+```
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb shell am instrument -w -e class com.jpcofano.shapeupbridge.RequestedRunKeepTest \
+  com.jpcofano.shapeupbridge.test/androidx.test.runner.AndroidJUnitRunner
+```
 
 ### 4 — Sin conexión ✅
 Vía: **botón real**, desde la PC, con el teléfono en modo avión.
@@ -170,7 +186,15 @@ firebase functions:log --project shapeup-41e74 --only pedirCorridaAlPuente -n 20
 - En `corridas.json`, corridas `segundo-plano` durante la noche separadas ~6 h (la periódica
   entró en Doze, en sus ventanas de mantenimiento).
 
-## Para P89 (no son del puente)
+## Para P89 / P91 (no son del puente)
+
+- **P91 — la guarda de "pedido de más de 5 minutos" usa el reloj del cliente.** Compara contra
+  `pedidoMs`, que es la hora del dispositivo que apretó el botón. Si ese reloj está atrasado
+  cinco minutos o más, **ningún pedido se despacha nunca** y nada lo delata: la app parece
+  andar y no llega nada. Desde el puente se vería como "Último push recibido" que no avanza
+  mientras ShapeUp dice que pidió. La función tiene que usar la hora de escritura del
+  documento, que conoce por su cuenta, y no una que manda el cliente. En estas pruebas ya se
+  vio un reloj de PC corrido (un `pedidoMs` posterior al `sentTime` de su propio push).
 
 - Cuando la función descarta un pedido por `muy-seguido`, la tarjeta lo sigue esperando y
   termina en "El reloj no contestó a tiempo", aunque el reloj contestó al pedido anterior.

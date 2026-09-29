@@ -1,6 +1,7 @@
 # Reporte P90 — El puente escucha
 
-Estado: **hecho y funcionando; pendientes la prueba de Doze real y tocar el botón de batería.** Lo probado está medido y dice
+Estado: **hecho y funcionando; pendientes Doze profundo (y de varias horas), Doze sin la
+exclusión de batería y tocar el botón de batería.** Lo probado está medido y dice
 por qué vía se disparó y con qué precisión. Lo pendiente está marcado `PENDIENTE` y no se
 rellenó con estimaciones.
 
@@ -66,8 +67,41 @@ Vía: **botón real**, desde la web en la PC. Doze profundo forzado con
 Botón → función no se pudo medir (reloj de la PC). Con el 1,12 s de la prueba 1, el punta a
 punta con instancia caliente se **estima** en ~4,2 s; es estimación, no medición.
 
-### 2b — Doze real — **PENDIENTE**
-Procedimiento abajo.
+### 2b — Doze real ✅ CERRADA en Doze liviano (28/09) / Doze profundo **PENDIENTE** (con P96 instalado)
+Vía: **botón real**, desde la web en la PC, con el teléfono apagado, desenchufado y excluido
+de la optimización de batería. 28/09, sin adb durante la prueba; evidencia reconstruida
+después. Auditoría completa en [auditorias/ultimochat.md](auditorias/ultimochat.md).
+
+**Doze liviano, unos 20 minutos de quietud efectiva.** Es una desviación: el prompt preveía
+50-55 minutos quieto, pero batterystats muestra la pantalla encendida a las 22:15:02–22:16:11 y
+22:30:00–22:31:07, y del último apagado al push pasaron ~19 min 45 s. **Esos dos encendidos no
+fueron de Juan**; probablemente fueron notificaciones. La prueba no se repite en liviano.
+
+Fuente de las corridas: `corridas.json` del puente, no `estado/puente`, que es un solo
+documento que cada corrida pisa. Antes y después de las 23:03:37 (Juan enciende el teléfono) se
+separa por el orden del archivo. El test de `KEEP` queda afuera.
+
+- **Estado de Doze al llegar el pedido**, según `batterystats`: `device_idle=light` (desde las
+  22:48:51, tras una ventana de mantenimiento). No profundo.
+- **Push:** una sola entrega de FCM al puente, a las 22:50:52.67 (reloj del teléfono); "Último
+  push recibido" avanzó una vez.
+- **Corrida con el teléfono apagado: sí.** `corridas.json` tiene una corrida **`pedido`** que
+  terminó a las 22:52:07 (33 leídos, 0 errores), la misma que batterystats registra como
+  `BridgeWorker` de 22:52:04.9 a 22:52:07.6, antes de que Juan encendiera la pantalla
+  (23:03:37). Después de encenderla no hubo corridas esa noche.
+- **Hallazgo:** entre la entrega del push y el arranque del worker pasaron ~72 s (mismo reloj,
+  el del teléfono), con la CPU dormida en el medio; el worker arrancó cuando un despertar
+  ajeno levantó al teléfono. Dos hipótesis, **no verificadas**: (1) el encolado no termina
+  antes de que la CPU se duerma, porque `onMessageReceived` no espera el resultado de
+  `enqueueUniqueWork`; (2) el trabajo no corre como expedited y JobScheduler lo difiere hasta
+  la próxima ventana. Hoy **sí se usa `setExpedited`**, con
+  `RUN_AS_NON_EXPEDITED_WORK_REQUEST`, que lo pasa a trabajo común si se agota la cuota; el
+  puente está en el grupo de standby EXEMPTED y sin sesiones de expedited guardadas, lo que
+  hace improbable la cuota agotada, pero no lo descarta.
+
+Sin probar: **Doze profundo** (va esta tarde, con P96 instalado), **Doze de varias horas**,
+**Doze sin la exclusión** de batería y **tocar el botón de batería**. El hallazgo de los 72 s se
+sigue en [prompts/96-el-push-que-se-duerme.md](prompts/96-el-push-que-se-duerme.md).
 
 ### 3 — Dos pedidos seguidos ✅ (en dos partes, ninguna es la cadena entera)
 
@@ -167,22 +201,31 @@ Samsung suma sus propias restricciones.
 **A la mañana, sin desbloquear el teléfono** (desbloquearlo lo saca de Doze)
 4. Desde la web de ShapeUp en la PC (https://shapeup-41e74.web.app), apretar el botón de la
    tarjeta Puente Samsung. Anotar la hora. Esperar un minuto.
-5. Recién ahí desbloquear y conectar adb. **No enchufarlo antes de juntar los datos**: al
-   cargar se reinicia el historial de batería.
+5. Recién ahí desbloquear y conectar adb, y juntar la evidencia enseguida: el log del
+   teléfono y el historial de JobScheduler se renuevan en horas. Enchufarlo no borra el
+   historial de batería (en la 2b del 28/09 sobrevivió), pero **no desenchufarlo después de
+   cargar** hasta haberlo leído: eso sí puede reiniciarlo.
 
 **Juntar la evidencia**
 ```
 adb shell dumpsys batterystats --history > bs.txt        # buscar device_idle=full / off con hora
 adb shell run-as com.jpcofano.shapeupbridge cat files/corridas.json
+adb shell run-as com.jpcofano.shapeupbridge cat shared_prefs/bridge.xml   # ultimoPushRecibidoMs
+adb shell dumpsys jobscheduler > js.txt                   # marca de expedited del job, si sigue en el historial
 adb logcat -d -v epoch -s ShapeUpBridge:V WM-WorkerWrapper:V
 firebase functions:log --project shapeup-41e74 --only pedirCorridaAlPuente -n 20
 ```
 
 **Qué tiene que dar**
 - En `bs.txt`, `device_idle=full` vigente a la hora del push (el teléfono estaba en Doze
-  profundo real).
-- En logcat, `push recibido` y `corrida pedido` sin errores; medir función → fin de corrida
-  como en la 2a.
+  profundo real), y **ningún `+screen`** entre que se dejó quieto y el push. Si hay
+  encendidos, la quietud efectiva se cuenta desde el último `-screen`.
+- Una corrida **`pedido`** en `corridas.json` antes de la hora en que se encendió el teléfono
+  (el `+screen` de la mañana en `bs.txt`). Esa es la evidencia.
+- Las horas de la función y de FCM son de otros relojes: se anotan como referencia y **no se
+  restan** contra las del teléfono. Los intervalos solo se calculan entre horas del teléfono
+  (batterystats, `corridas.json`, `ultimoPushRecibidoMs`), por ejemplo push entregado →
+  arranque del worker.
 - En `corridas.json`, corridas `segundo-plano` durante la noche separadas ~6 h (la periódica
   entró en Doze, en sus ventanas de mantenimiento).
 

@@ -2,6 +2,7 @@ package com.jpcofano.shapeupbridge
 
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
@@ -17,6 +18,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * P90: ShapeUp pide una corrida con un push de datos, silencioso. No abre la app ni muestra
@@ -31,13 +35,38 @@ class PushService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
+        val receivedMs = System.currentTimeMillis()
         Log.i(TAG, "push recibido: prioridad=${message.priority} original=${message.originalPriority} enviadoMs=${message.sentTime} datos=${message.data}")
-        PushLog.received(applicationContext)
-        BridgeWorker.runRequested(applicationContext)
+
+        // P96: se espera el encolado. FCM suelta su wakelock cuando este metodo vuelve; si el job
+        // todavia no esta en JobScheduler, la CPU se duerme y el pedido espera al proximo
+        // despertar ajeno (28/09: 72 s). Este metodo corre en un hilo de fondo de FCM, no en el
+        // principal, asi que bloquear un momento es valido.
+        val started = SystemClock.elapsedRealtime()
+        val enqueue = try {
+            BridgeWorker.runRequested(applicationContext).result.get(ENQUEUE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            "ok"
+        } catch (e: TimeoutException) {
+            Log.w(TAG, "el encolado del pedido no termino en $ENQUEUE_TIMEOUT_MS ms")
+            "tope"
+        } catch (t: Throwable) {
+            Log.e(TAG, "fallo el encolado del pedido", t)
+            "error: ${t.javaClass.simpleName}"
+        }
+        val enqueueMs = SystemClock.elapsedRealtime() - started
+        Log.i(TAG, "pedido encolado: $enqueue en $enqueueMs ms")
+        PushLog.received(
+            applicationContext, receivedMs, message.priority, message.originalPriority, enqueue, enqueueMs,
+        )
     }
 
     companion object {
         private const val TAG = "ShapeUpBridge"
+        /**
+         * Tope de la espera del encolado. Android le da a onMessageReceived unos 10 s antes de
+         * considerarlo colgado; el encolado normal tarda milisegundos. 3 s deja margen de sobra.
+         */
+        const val ENQUEUE_TIMEOUT_MS = 3_000L
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     }
 }
@@ -103,14 +132,67 @@ object DeviceToken {
     }
 }
 
-/** Cuando llego el ultimo push. Su resultado es la primera corrida "pedido" posterior. */
+/**
+ * El ultimo push. Su resultado es la primera corrida "pedido" posterior.
+ *
+ * P96: ademas de la hora, guarda la prioridad con que llego (y la que pidio el servidor) y como
+ * termino el encolado. La corrida que genera lo copia a su fila de corridas.json, para no tener
+ * que adivinar la proxima vez que un pedido tarde.
+ */
 object PushLog {
     private const val PREFS = "bridge"
     private const val KEY_MS = "ultimoPushRecibidoMs"
+    private const val KEY_PRIORITY = "ultimoPushPrioridad"
+    private const val KEY_ORIGINAL = "ultimoPushPrioridadOriginal"
+    private const val KEY_ENQUEUE = "ultimoPushEncolado"
+    private const val KEY_ENQUEUE_MS = "ultimoPushEncoladoMs"
 
-    fun received(context: Context) {
+    class Record(
+        val receivedMs: Long,
+        val priority: String,
+        val originalPriority: String,
+        val enqueue: String,
+        val enqueueMs: Long,
+    ) {
+        fun toJson(): JSONObject = JSONObject()
+            .put("recibidoMs", receivedMs).put("prioridad", priority)
+            .put("prioridadOriginal", originalPriority)
+            .put("encolado", enqueue).put("encoladoMs", enqueueMs)
+    }
+
+    fun received(
+        context: Context,
+        receivedMs: Long,
+        priority: Int,
+        originalPriority: Int,
+        enqueue: String,
+        enqueueMs: Long,
+    ) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putLong(KEY_MS, System.currentTimeMillis()).apply()
+            .putLong(KEY_MS, receivedMs)
+            .putString(KEY_PRIORITY, priorityName(priority))
+            .putString(KEY_ORIGINAL, priorityName(originalPriority))
+            .putString(KEY_ENQUEUE, enqueue)
+            .putLong(KEY_ENQUEUE_MS, enqueueMs)
+            .apply()
+    }
+
+    /** El ultimo push registrado, o null si no hubo ninguno desde P96. */
+    fun last(context: Context): Record? {
+        val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val ms = p.getLong(KEY_MS, 0)
+        val priority = p.getString(KEY_PRIORITY, null) ?: return null
+        if (ms == 0L) return null
+        return Record(
+            ms, priority, p.getString(KEY_ORIGINAL, null) ?: "?",
+            p.getString(KEY_ENQUEUE, null) ?: "?", p.getLong(KEY_ENQUEUE_MS, -1),
+        )
+    }
+
+    private fun priorityName(p: Int) = when (p) {
+        RemoteMessage.PRIORITY_HIGH -> "alta"
+        RemoteMessage.PRIORITY_NORMAL -> "normal"
+        else -> "desconocida($p)"
     }
 
     fun lastMs(context: Context): Long =

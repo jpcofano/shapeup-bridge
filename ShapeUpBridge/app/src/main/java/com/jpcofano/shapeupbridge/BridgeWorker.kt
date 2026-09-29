@@ -19,6 +19,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.Operation
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -116,14 +117,18 @@ class BridgeWorker(context: Context, params: WorkerParameters) : CoroutineWorker
          * P90: la corrida que pide un push. Expedited para que entre aun en Doze; si se agoto la
          * cuota, corre como trabajo comun en vez de perderse. KEEP: un segundo push mientras la
          * primera espera o corre no encola otra.
+         *
+         * P96: devuelve la Operation. El encolado es asincrono (guarda en la base y recien despues
+         * agenda en JobScheduler); quien llama desde un push tiene que esperarla, o la CPU se
+         * duerme antes de que el job exista.
          */
-        fun runRequested(context: Context) {
+        fun runRequested(context: Context): Operation {
             val request = OneTimeWorkRequestBuilder<BridgeWorker>()
                 .setConstraints(constraints(batteryNotLow = false))
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .setInputData(workDataOf(KEY_ORIGIN to Origin.REQUESTED.value))
                 .build()
-            WorkManager.getInstance(context)
+            return WorkManager.getInstance(context)
                 .enqueueUniqueWork(REQUESTED, ExistingWorkPolicy.KEEP, request)
         }
 

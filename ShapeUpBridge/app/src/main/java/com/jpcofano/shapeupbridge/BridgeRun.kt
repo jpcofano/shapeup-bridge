@@ -42,6 +42,8 @@ class RunSummary(
     val windowDays: Int,
     val queued: Int,
     val note: String?,
+    // P96: el push que genero esta corrida (solo en las "pedido"). Local, no va a Firestore.
+    val push: JSONObject? = null,
 ) {
     /** Exactamente los campos que aceptan las reglas de estado/puente. */
     fun toEstado(): Map<String, Any> {
@@ -66,6 +68,7 @@ class RunSummary(
         .put("skipped", skipped).put("errors", errors).put("durationMs", durationMs)
         .putRaw("message", message).put("windowDays", windowDays).put("queued", queued)
         .putRaw("note", note)
+        .also { if (push != null) it.put("push", push) }
 
     companion object {
         fun fromJson(j: JSONObject) = RunSummary(
@@ -82,6 +85,7 @@ class RunSummary(
             windowDays = j.optInt("windowDays"),
             queued = j.optInt("queued"),
             note = if (j.isNull("note")) null else j.optString("note"),
+            push = j.optJSONObject("push"),
         )
     }
 }
@@ -162,6 +166,18 @@ object BridgeRun {
         userUid: String,
         log: (String) -> Unit = {},
     ): RunOutcome = running.withLock { executeLocked(context, origin, userUid, log) }
+
+    /**
+     * P96: el push que genero esta corrida "pedido": el ultimo registrado, solo si llego despues
+     * de la corrida "pedido" anterior. Si no (el test de KEEP, que pide sin push), queda null en
+     * vez de atribuirle un push viejo.
+     */
+    private fun pushOfThisRun(context: Context): JSONObject? {
+        val push = PushLog.last(context) ?: return null
+        val previous = RunHistory.all(context).firstOrNull { it.origin == Origin.REQUESTED.value }
+        if (previous != null && push.receivedMs <= previous.endedMs) return null
+        return push.toJson()
+    }
 
     private suspend fun executeLocked(
         context: Context,
@@ -254,6 +270,7 @@ object BridgeRun {
             windowDays = days,
             queued = result?.queued ?: 0,
             note = null,
+            push = if (origin == Origin.REQUESTED) pushOfThisRun(app) else null,
         )
 
         // Estado de la corrida en Firestore. Si falla, queda anotado en el historial local.
@@ -273,6 +290,7 @@ object BridgeRun {
                 summary.endedMs, summary.version, summary.origin, summary.read, summary.uploaded,
                 summary.unchanged, summary.skipped, summary.errors, summary.durationMs,
                 summary.message, summary.windowDays, summary.queued, estadoError.take(300),
+                summary.push,
             )
         }
         withContext(Dispatchers.IO) { RunHistory.add(app, summary) }
